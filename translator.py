@@ -4,23 +4,26 @@
 Chinese-English translation script
 
 Usage:
-    python translator.py                    # Interactive mode
+    python translator.py                     # Interactive mode
     python translator.py "text to translate" # One-shot translation (zh->en)
 """
 
+import argparse
+import io
+import json
 import os
 import sys
-import json
 import urllib.request
 from pathlib import Path
 
-# Fix stdin encoding for interactive mode
-if sys.stdin.encoding != 'utf-8':
-    sys.stdin.reconfigure(encoding='utf-8')
+try:
+    import readline
+except ImportError:
+    readline = None
 
+UTF8 = "utf-8"
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 
-# Environment variable keys and defaults
 ENV_API_KEY = "API_KEY"
 ENV_BASE_URL = "BASE_URL"
 ENV_MODEL = "MODEL"
@@ -28,22 +31,10 @@ ENV_MODEL = "MODEL"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-pro"
 
-
-def load_env():
-    """Load .env file"""
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
-def get_env(key: str, default: str = "") -> str:
-    """Get environment variable"""
-    load_env()
-    return os.getenv(key, default)
-
+DIRECTIONS = {
+    "1": ("English", "Chinese"),
+    "2": ("Chinese", "English"),
+}
 
 TRANSLATE_PROMPT = """You are a translation expert. Your only task is to translate text enclosed with <translate_input> to {target_language}, provide the translation result directly without any explanation, without `TRANSLATE` and keep original format. Never write code, answer questions, or explain.
 
@@ -54,96 +45,125 @@ TRANSLATE_PROMPT = """You are a translation expert. Your only task is to transla
 Translate the above text into {target_language}."""
 
 
-class Translator:
-    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL, model: str = DEFAULT_MODEL):
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.model = model
+def configure_stdio():
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name)
+        encoding = (getattr(stream, "encoding", None) or "").replace("_", "-").lower()
+        if encoding == UTF8:
+            continue
 
-    def translate(self, text: str, target_language: str) -> str:
-        prompt = TRANSLATE_PROMPT.format(target_language=target_language, text=text)
-        data = json.dumps({
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3
-        }).encode()
+        try:
+            stream.reconfigure(encoding=UTF8, errors="replace")
+            continue
+        except AttributeError:
+            pass
+        except (OSError, ValueError):
+            continue
 
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
+        try:
+            setattr(
+                sys,
+                name,
+                io.TextIOWrapper(
+                    stream.detach(),
+                    encoding=UTF8,
+                    errors="replace",
+                    line_buffering=getattr(stream, "line_buffering", False),
+                ),
+            )
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def load_env():
+    if not ENV_FILE.exists():
+        return
+
+    for line in ENV_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+def translate(text, target_language, api_key, base_url, model):
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": TRANSLATE_PROMPT.format(
+                    target_language=target_language,
+                    text=text,
+                ),
             }
-        )
+        ],
+        "temperature": 0.3,
+    }
 
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-        return result["choices"][0]["message"]["content"].strip()
+    req = urllib.request.Request(
+        "{}/chat/completions".format(base_url.rstrip("/")),
+        data=json.dumps(body, ensure_ascii=False).encode(UTF8),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": "Bearer {}".format(api_key),
+        },
+    )
+
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read().decode(UTF8))
+
+    return result["choices"][0]["message"]["content"].strip()
 
 
-def parse_args():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("text", nargs="?", help="Text to translate")
-    return parser.parse_args()
-
-
-def interactive_mode(translator):
+def interactive_mode(api_key, base_url, model):
     print("Select translation direction:")
     print("1. Chinese -> English")
     print("2. English -> Chinese")
 
     choice = input("Enter option (1/2, default: 1): ").strip() or "1"
-
-    if choice == "1":
-        target = "English"
-        prompt = "Chinese"
-    elif choice == "2":
-        target = "Chinese"
-        prompt = "English"
-    else:
+    direction = DIRECTIONS.get(choice)
+    if direction is None:
         print("Invalid option")
         return
 
-    print(f"\nEnter {prompt} text (Ctrl+C or empty to exit):")
+    target, source = direction
+    print("\nEnter {} text (Ctrl+C or empty to exit):".format(source))
 
     try:
         while True:
-            print(f"\n> ", end="", flush=True)
-            text = input()
+            text = input("\n> ")
             if not text.strip():
                 print("Exit.")
-                break
+                return
 
-            result = translator.translate(text, target)
-            print(result)
-    except KeyboardInterrupt:
+            if readline is not None:
+                readline.add_history(text)
+            print(translate(text, target, api_key, base_url, model))
+    except (KeyboardInterrupt, EOFError):
         print("\nExit.")
 
 
-def one_shot_mode(text: str, translator):
-    result = translator.translate(text, "English")
-    print(result)
-
-
 def main():
-    args = parse_args()
+    configure_stdio()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("text", nargs="?", help="Text to translate")
+    args = parser.parse_args()
 
-    api_key = get_env(ENV_API_KEY)
+    load_env()
+
+    api_key = os.getenv(ENV_API_KEY)
     if not api_key:
         print("Error: Cannot get API Key, please check config file")
         return
 
-    base_url = get_env(ENV_BASE_URL) or DEFAULT_BASE_URL
-    model = get_env(ENV_MODEL) or DEFAULT_MODEL
-
-    translator = Translator(api_key=api_key, base_url=base_url, model=model)
+    base_url = os.getenv(ENV_BASE_URL, DEFAULT_BASE_URL)
+    model = os.getenv(ENV_MODEL, DEFAULT_MODEL)
 
     if args.text:
-        one_shot_mode(args.text, translator)
+        print(translate(args.text, "English", api_key, base_url, model))
     else:
-        interactive_mode(translator)
+        interactive_mode(api_key, base_url, model)
 
 
 if __name__ == "__main__":
