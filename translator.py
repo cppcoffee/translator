@@ -18,7 +18,7 @@ from pathlib import Path
 if sys.stdin.encoding != 'utf-8':
     sys.stdin.reconfigure(encoding='utf-8')
 
-ENV_FILE = Path(__file__).parent / ".env"
+ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 # Environment variable keys and defaults
 ENV_API_KEY = "API_KEY"

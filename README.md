@@ -48,6 +48,18 @@ Run the script:
 python translator.py
 ```
 
+Or create a symlink for global access:
+
+```bash
+sudo ln -s /path/to/translator/translator.py /usr/local/bin/translator
+```
+
+Then use directly:
+
+```bash
+translator
+```
+
 Follow the prompts to select translation direction and input your text.
 
 ## Example
